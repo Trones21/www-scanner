@@ -1,0 +1,13 @@
+# Corpora and results are large, regenerable artifacts. The manifest is the
+# thing worth committing — it names the exact Tranco list and its checksum, so
+# a corpus is reproducible without storing 22MB of domains in git.
+corpora/*
+!corpora/*.json
+results/
+*.bin
+*.csv
+
+# Anchored: an unanchored "wwwscan" would also match the cmd/wwwscan/ directory
+# and quietly exclude the CLI from the repo.
+/wwwscan
+/dist/
