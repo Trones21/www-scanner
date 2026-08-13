@@ -1,0 +1,21 @@
+# Zero-code sink option: CoreDNS with the `template` plugin.
+# Answers EVERY A/AAAA query with a reserved-range address, authoritatively,
+# with no recursion and no rate limiting.
+#
+# Run:  coredns -conf ./Corefile
+#       (listens on :53; needs root, or change the port below to :5353)
+#
+# This is the low-effort alternative to the Go responder in main.go. The Go
+# responder scales to higher PPS (SO_REUSEPORT per core) and has zero deps;
+# CoreDNS is easier if you already have it. Either works as the sink.
+
+.:53 {
+    template IN A {
+        answer "{{ .Name }} 60 IN A 192.0.2.1"
+    }
+    template IN AAAA {
+        answer "{{ .Name }} 60 IN AAAA 2001:db8::1"
+    }
+    # No log/errors plugins on purpose — logging every query would itself cap
+    # throughput. Add `errors` back only while debugging.
+}
