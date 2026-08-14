@@ -23,10 +23,15 @@ can be reproduced exactly.
 | vantage | residential connection, Colorado |
 | provenance | `results/census-sample.bin.meta.json` |
 
-**Headline: of domains that serve a homepage, 90.47% ± 0.17 also serve `www`.**
+**Headline: of domains that serve a homepage and were successfully measured,
+91.08% ± 0.17 also serve `www`.**
 
 - 68.4% of the sampled corpus serves a homepage at all; the rest is CDN, API and
   DNS infrastructure that was never a website.
+- 682 apex-serving domains had a `www` probe that stalled. They are excluded from
+  the ratio rather than counted as broken — they were not measured, and assuming
+  either answer would be inventing data. An earlier version of this page said
+  90.47% because it folded them in as failures.
 - Over half of all `www` breakage is a DNS record nobody created (37.5% NXDOMAIN,
   7.5% NODATA). The next largest cause, 18.8%, is a certificate never reissued to
   cover the name — someone added the record and stopped there.

@@ -10,7 +10,18 @@ pointing `www` at a CDN was one line and pointing the bare domain at one was a
 research project. Once ALIAS records and CNAME flattening fixed the apex, the
 ordering flipped and `www` became the afterthought.
 
-This measures how far that has gone, across a corpus of real domains.
+This measures how far that has gone.
+
+**The target is every currently registered domain** — roughly 360 million across
+all TLDs. ICANN CZDS zone files are the intended corpus, because a TLD zone
+contains exactly the *delegated* names: a domain that lapsed drops out at the
+next daily refresh, so an expired registration never gets counted as "someone
+who broke `www`". Those two failures are indistinguishable by DNS alone and
+conflating them would corrupt the measurement.
+
+Tranco's top million is the **test harness**, not the target. It is small,
+citable and permanently archived, which makes it the right thing to develop the
+classifier against and to eyeball specific names in.
 
 It exists because I found `www` broken on all four of my own domains —
 `ERR_NAME_NOT_RESOLVED`, no record at all — and four data points can't tell
@@ -26,10 +37,13 @@ go build -o wwwscan ./cmd/wwwscan
 # One domain, human-readable. No corpus needed.
 ./wwwscan probe github.com
 
-# Freeze a corpus, scan a slice of it, read the numbers.
+# Freeze a corpus, sample it, read the numbers.
 ./wwwscan corpus -out corpora/tranco.txt
-./wwwscan scan   -corpus corpora/tranco.txt -out results/run1.bin -limit 5000 -workers 200
+./wwwscan scan   -corpus corpora/tranco.txt -out results/run1.bin -sample 20000 -workers 200
 ./wwwscan report -corpus corpora/tranco.txt -results results/run1.bin
+
+# Time-boxed throughput sweep — a row per configuration as it lands.
+./wwwscan bench  -workers 200,1000 -duration 15s
 ```
 
 `probe` is the fastest way to see what the classifier does:
@@ -55,7 +69,8 @@ wrong in both directions, and most of the design follows from fixing it.
 anything. So the scanner separates NXDOMAIN from NOERROR-with-no-answers, and
 when `www` resolves it fires one query at a random 15-character label. If that
 resolves too, `www` resolving is not evidence anyone configured `www`. In the
-Tranco top 5k, **~15% of domains whose `www` resolves are wildcard zones.**
+150k random sample, **26,085 zones — 20% of those whose `www` resolves — are
+wildcards.**
 
 **Wrong on the false-negative side.** There's a ladder of ways to resolve and
 still be broken, and they're different mistakes by different people:
@@ -120,109 +135,149 @@ Three consequences worth having:
 The corpus itself is frozen and checksummed. Positional records are meaningless
 against a different corpus, so the sink refuses to open a result file whose
 length disagrees with the corpus, and the manifest records the exact Tranco list
-ID so the denominator is re-downloadable:
+ID so the denominator is re-downloadable. Every scan also writes a
+`.meta.json` beside its results recording the sample seed, every timeout, and
+the validity achieved — and `report` refuses to pair results with a corpus they
+were not written against, because two Tranco lists from different days are both
+exactly a million entries:
 
 ```json
 {
   "source": "tranco",
-  "source_url": "https://tranco-list.eu/download/GQP4K/1000000",
-  "list_id": "GQP4K",
+  "source_url": "https://tranco-list.eu/download/26J79/1000000",
+  "list_id": "26J79",
   "count": 1000000,
-  "sha256": "8ab1f621118f3f704465a11b51769cfc584f261f300d8ca427aad5733ec56eb8"
+  "sha256": "33243560e98e15e05462f2b1fdf2dd57779977273838095454fecd104f0baf5b"
 }
 ```
 
 ## First results
 
-Tranco list `GQP4K`, top 5,000, 2026-08-08. A slice, not the headline number.
+Run 1: **150,000-domain uniform random sample** of Tranco list `26J79`,
+2026-08-13, seed `20260813`. Full write-up and provenance in
+[RUNS.md](RUNS.md).
 
 ```
 HEADLINE
-  apex serves a site           3032  60.64% of corpus
-  ...of those, www works       2728  89.97%   <- the number the question is asking
-  ...of those, www broken       304  10.03%
+  probed                     150000  domains that produced a result
+  apex serves a site         102569  68.38% of those
+
+  ...www never measured         682  probe stalled — excluded from the ratio below
+
+  of the 101887 measured:
+    www works                 92798  91.08% +/- 0.17 pts (95% CI)   <- THE ANSWER
+    www broken                 9089   8.92%
 
 HOW www BREAKS (on domains whose apex serves)
-  no dns record at all (nxdomain)         102  33.55%
-  resolves, connection hangs               65  21.38%
-  tcp error                                26   8.55%
-  serves, returns 404                      24   7.89%
-  serves, returns 403                      23   7.57%
-  cert has no SAN for www                  22   7.24%
-  name exists, no address record           21   6.91%
+  no dns record at all (nxdomain)        3660  37.46%
+  cert has no SAN for www                1840  18.83%
+  name exists, no address record          732   7.49%
+  tls error                               728   7.45%
+  serves, returns 403                     644   6.59%
+  resolves, connection hangs              489   5.00%
+  serves, returns 404                     444   4.54%
+  cert expired                            229   2.34%
 
 CANONICAL DIRECTION
-  both-fail                  1651  33.02%
-  apex->www                  1285  25.70%
-  www->apex                  1225  24.50%
-  both-serve-no-canonical     321   6.42%
-  apex-only                   308   6.16%
-  www-only                    210   4.20%
+  www->apex                             40818  27.21%
+  both-fail                             36411  24.27%
+  apex->www                             30796  20.53%
+  both-serve-no-canonical               28635  19.09%
+  apex-only                              8476   5.65%
+  www-only                               4864   3.24%
 ```
 
-**The denominator is the finding here.** Only 61% of the Tranco top 5k serve a
-homepage at the apex at all. The rest is infrastructure — `gtld-servers.net`,
-`akamaiedge.net`, `apple-dns.net`, `googleapis.com` — which ranks highly because
-Tranco is built partly from DNS query volume, and which has no opinion about
-`www`. Measuring against the whole corpus gives 58.72%; measuring against
-domains that are actually websites gives 89.97%. Same data, thirty-one points
-apart, and the second one is the answer to the question that was asked.
+**Over half of all breakage is a record nobody created** — 37.5% NXDOMAIN plus
+7.5% NODATA. Not a misconfiguration, an absence. The second cause is subtler:
+18.8% added the DNS record and never reissued the certificate to cover the name,
+so the connection opens and the handshake is refused.
 
-Two caveats to carry into any write-up:
+**The denominator is the other finding.** Only 68% of the corpus serves a
+homepage at all; the rest is CDN, API and DNS infrastructure that was never a
+website and has no opinion about `www`. Measured against everything, the number
+is 65.4%. Measured against actual websites that were successfully measured, 91.1%.
+Same data, twenty-six points
+apart, and only one of them answers the question that was asked.
 
-- **The top million is a biased sample.** These are the domains most likely to
-  have someone competent running DNS. 90% is closer to an upper bound than an
-  average — if even this population is at 10% broken, the tail is worse.
-- **Negative caching biases the number down, never up.** An NXDOMAIN answer may
-  be a cached negative from before someone fixed it, and SOA minimums are
-  routinely 24h. A domain that added `www` this morning still reads NXDOMAIN
-  through a caching resolver until tomorrow.
+Sample, not head-of-list: `-sample` draws uniformly across the corpus, which is
+the difference between an estimate and a ceiling. The first 5,000 Tranco entries
+are Google and Cloudflare, whose ops teams do not forget to configure `www` —
+they scored 89.97% under the old accounting, so the popularity bias turned out to be
+about half a point.
+
+Three caveats for any write-up:
+
+- **Even the full million is a biased sample of the web**, and it is not the
+  target population. These are domains someone visits. The registered tail is
+  almost certainly worse.
+- **Negative caching biases the number down, never up.** An NXDOMAIN may be a
+  cached negative from before someone fixed it, and SOA minimums are routinely
+  24h. Querying authoritative nameservers on the final pass would remove it.
+- **Validity was 93.0%**, below the 95% census floor, so the scanner declined to
+  certify its own run. Re-probing 3,000 stalled domains at 25 workers found ~85%
+  still stall, i.e. genuinely unreachable hosts rather than scanner congestion;
+  corrected validity is ~99%. See [The Stall Ladder](https://claude.ai/code/artifact/874537f7-fda1-4d5e-98a7-0f12451cdcac).
 
 So: I shipped four broken sites, and roughly one site in ten is in the same
 state. Both stories were true.
 
 ## Throughput: what actually gave out
 
-Same 5,000 domains, `-null-sink`, from a laptop on a domestic connection.
+Two ceilings matter, and they are nowhere near each other.
 
-| workers | resolver | timeout | domains/sec | mean | in-flight (Little's N) |
-|--:|---|--:|--:|--:|--:|
-| 200 | systemd stub | 10s | 85.5 | 1.92s | 165 / 200 |
-| 200 | 1.1.1.1 + 8.8.8.8 + 9.9.9.9 | 10s | 99.8 | 1.77s | 177 / 200 |
-| 200 | public | **3s** | 100.3 | 1.78s | 179 / 200 |
-| 1000 | public | 10s | 139.2 | 5.63s | 784 / 1000 |
+**With the network removed**, the resolver does **138,000 DNS queries/sec**
+against a synthetic authoritative server on loopback
+(`go test ./internal/resolve/ -bench Ceiling`):
 
-Little's Law holds to the digit throughout — `784 / 5.632s = 139`. Which makes
-the table readable as a diagnosis rather than a list of numbers:
+| pooled sockets | lookups/s | queries/s |
+|--:|--:|--:|
+| 1 | 47,664 | 95,327 |
+| 4 | 66,380 | 132,760 |
+| 16 | **69,186** | **138,372** |
 
-**Moving off the systemd-resolved stub bought 17%**, not the order of magnitude
-the notes half-expected. The stub was a real constraint and a small one.
+**In the field**, the full census ladder does about **110 domains/sec**, which
+is roughly 550 queries/sec — a 250x gap, none of it in the code. Measured on a
+150k sample and a null-sink sweep:
 
-**Cutting the timeout from 10s to 3s bought nothing at all** — throughput and
-mean latency both unchanged to within noise. That kills the tail-latency
-hypothesis for this workload at this concurrency: if the mean were dominated by
-probes parked on the timeout ceiling, moving the ceiling would have moved the
-mean. It didn't. The mean is the bulk of the distribution, not its tail. All the
-shorter timeout did was turn slow successes into failures.
+| workers | resolver | eff/s | validity | bound by |
+|--:|---|--:|--:|---|
+| 200 | systemd stub | 85.5 | — | the stub |
+| 200 | 6 public | 109.6 | 95.4% | new connections/sec |
+| 1,000 | 6 public | 109.3 | 79.3% | same ceiling, more failure |
+| 10,000 | 6 public | ~130 | 9.8% | same ceiling, mostly failure |
 
-**5× the workers bought 1.4× the throughput and tripled the mean.** Sublinear
-throughput with superlinear latency is a shared resource saturating, and it
-isn't any of the local suspects: fds are capped at 524288, conntrack peaked at
-54825 of 262144 (21%), and CPU sat near one core of sixteen. The remaining
-candidates are all off-box — the household NAT, the uplink, or per-source rate
-limiting at the resolvers — and telling them apart needs a run from a different
-vantage point rather than more instrumentation on this one.
+Everything local was idle throughout: one core of sixteen, ~90 MB of RAM, 7 Mbps
+of a home connection, conntrack at 39% of its ceiling, file descriptors at 6%.
 
-**The part that matters most is that the 1000-worker run produced different
-answers.** Successful TLS handshakes fell from 3408 to 2660 against the same
-corpus; `www-only` went from 229 to 575. The scan wasn't just slower per unit of
-work, it was wrong — congestion turned real sites into timeouts, and every one
-of those would have been recorded as a broken `www`.
+What did give out, in order of discovery:
 
-That's the census/throughput split earning its keep. A run tuned for speed
-silently manufactures failures, and the failure it manufactures is exactly the
-thing being measured. Census runs stay at concurrency the network can actually
-sustain; the benchmark can push until it breaks, because nobody reads its output.
+- **Ephemeral ports, at 10,000 workers.** One UDP socket per query held 28,236
+  local ports against a range of 28,232. The design notes had ruled this out
+  because destinations vary — true for HTTP, whose TCP sockets peaked at a
+  harmless 2,312, and false for DNS, where three upstreams share the whole port
+  space. Pooling took it to 42 ports and did not make anything faster, because
+  it was never the binding constraint at usable concurrency.
+- **The tail-latency hypothesis was wrong.** Cutting the HTTP timeout from 10s
+  to 3s changed throughput and mean latency by less than 1%. It only converted
+  slow successes into failures.
+- **Provider egress limits**, which nobody predicted. A Hostinger VPS managed
+  15 effective domains/sec: healthy at 20 workers (93.2% validity), collapsing
+  to 39.7% at 200, with `tcp=377 servfail=1` — connections dropped, DNS fine.
+  That is roughly 30 new outbound connections per second, enforced silently by
+  discarding SYNs, and it exists because a `www` census looks exactly like a
+  port scan.
+
+**Raw domains/sec is a trap.** A timed-out probe is cheaper than a completed
+one, so pushing concurrency makes the headline number rise while the data
+evaporates: 10,000 workers reached ~860 raw/s at 15% validity. Every rate quoted
+here is `eff/s` — conclusively classified domains per second — and a run below
+95% validity is refused as a census.
+
+The conclusion the numbers force: **the scarce resource is not bandwidth, CPU or
+sockets. It is permission** — how many new connections per second the network
+path will allow. That is a procurement question for the HTTPS half. The DNS
+half, where the client is already at 138k qps, is not constrained by anything we
+have measured yet.
 
 ## Ground truth
 

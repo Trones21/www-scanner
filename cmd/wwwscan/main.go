@@ -255,6 +255,9 @@ func cmdScan(ctx context.Context, args []string) error {
 	limit := fs.Int("limit", 0, "scan only the first N domains in corpus order (0 = all) — this is the HEAD of a popularity-ranked list, not a sample")
 	sample := fs.Int("sample", 0, "randomly sample N domains from across the whole corpus (preferred over -limit for any published number)")
 	seed := fs.Uint64("seed", 0, "sample seed; 0 picks one and records it so the sample is reproducible")
+	recheck := fs.String("recheck", "", "re-probe only the domains a previous result file matched (path to that .bin)")
+	recheckFilter := fs.String("recheck-filter", "broken", "which of them: broken, working, stalled, serving, all")
+	recheckStride := fs.Int("recheck-stride", 1, "take every Nth match, for rotating re-verification across days")
 	duration := fs.Duration("duration", 0, "stop feeding new domains after this long, then drain (0 = no time box)")
 	resume := fs.Bool("resume", true, "skip domains that already have a result")
 	timeout := fs.Duration("timeout", 10*time.Second, "per-name HTTP timeout")
@@ -334,6 +337,9 @@ func cmdScan(ctx context.Context, args []string) error {
 	if *sample > 0 && *limit > 0 {
 		return fmt.Errorf("use -sample or -limit, not both: one draws from the whole corpus, the other takes the head of it")
 	}
+	if *recheck != "" && (*sample > 0 || *limit > 0) {
+		return fmt.Errorf("-recheck selects its own domains; drop -sample and -limit")
+	}
 	sampleMeta := runmeta.Sample{
 		Method: "full", Size: len(c.Domains),
 		Fraction: "100%", Note: "every domain in the corpus",
@@ -352,6 +358,34 @@ func cmdScan(ctx context.Context, args []string) error {
 			Method: "random", Size: *sample, Seed: s,
 			Fraction: fmt.Sprintf("%.2f%%", float64(*sample)/float64(len(c.Domains))*100),
 			Note:     "uniform random sample drawn across the whole corpus",
+		}
+	} else if *recheck != "" {
+		prev, err := sink.Open(*recheck)
+		if err != nil {
+			return fmt.Errorf("open previous results: %w", err)
+		}
+		defer prev.Close()
+		if prev.Len() != len(c.Domains) {
+			return fmt.Errorf("previous results hold %d records but this corpus has %d domains; a recheck must run against the corpus it was written for",
+				prev.Len(), len(c.Domains))
+		}
+		f, err := scan.ParseRecheckFilter(*recheckFilter)
+		if err != nil {
+			return err
+		}
+		opts.Indices = scan.RecheckIndices(prev, f, *recheckStride)
+		if len(opts.Indices) == 0 {
+			return fmt.Errorf("no domains in %s match filter %q", *recheck, *recheckFilter)
+		}
+		total = len(opts.Indices)
+		note := fmt.Sprintf("re-probe of domains matching %q in %s", *recheckFilter, *recheck)
+		if *recheckStride > 1 {
+			note += fmt.Sprintf(", every %d%s match", *recheckStride, ordinalSuffix(*recheckStride))
+		}
+		sampleMeta = runmeta.Sample{
+			Method: "recheck", Size: len(opts.Indices),
+			Fraction: fmt.Sprintf("%.2f%%", float64(len(opts.Indices))/float64(len(c.Domains))*100),
+			Note:     note,
 		}
 	} else if *limit > 0 {
 		sampleMeta = runmeta.Sample{
@@ -551,6 +585,22 @@ func cmdDiff(args []string) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+// ordinalSuffix is only for the human-readable note in run metadata.
+func ordinalSuffix(n int) string {
+	if n%100 >= 11 && n%100 <= 13 {
+		return "th"
+	}
+	switch n % 10 {
+	case 1:
+		return "st"
+	case 2:
+		return "nd"
+	case 3:
+		return "rd"
+	}
+	return "th"
 }
 
 func short(s string) string {

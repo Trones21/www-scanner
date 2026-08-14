@@ -40,6 +40,12 @@ type Summary struct {
 	// WWWBroken counts the finding: the apex serves a site, and www does
 	// not. The bucket all four of my own domains were in.
 	WWWBroken int
+	// WWWUnknown counts apex-serving domains whose www probe stalled. These
+	// are neither working nor broken — they were not measured. Counting
+	// them as broken, which an earlier version did, silently treats the
+	// scanner's own timeouts as findings about the web and biases the
+	// headline down.
+	WWWUnknown int
 	// BrokenReason breaks WWWBroken down by which rung of the ladder gave
 	// way. Three different mistakes by three different people.
 	BrokenReason map[string]int
@@ -95,9 +101,12 @@ func Build(c *corpus.Corpus, res sink.Sink) Summary {
 
 		if apexServes(r) {
 			s.ApexServes++
-			if supported {
+			switch {
+			case !r.Conclusive():
+				s.WWWUnknown++
+			case supported:
 				s.WWWSupportedOfServing++
-			} else {
+			default:
 				s.WWWBroken++
 				s.BrokenReason[brokenReason(r)]++
 			}
@@ -166,24 +175,32 @@ func (s Summary) Write(w io.Writer) {
 		return
 	}
 	pct := func(n int) string { return fmt.Sprintf("%5.2f%%", float64(n)/float64(s.Attempted)*100) }
-	ofServing := func(n int) string {
-		if s.ApexServes == 0 {
+	// The denominator is the measured population, not every apex-serving
+	// domain: a probe that stalled tells us nothing about that domain, and
+	// folding it in either direction would be inventing data.
+	measured := s.WWWSupportedOfServing + s.WWWBroken
+	ofMeasured := func(n int) string {
+		if measured == 0 {
 			return "    -"
 		}
-		return fmt.Sprintf("%5.2f%%", float64(n)/float64(s.ApexServes)*100)
+		return fmt.Sprintf("%5.2f%%", float64(n)/float64(measured)*100)
 	}
 
 	fmt.Fprintf(w, "\nHEADLINE\n")
 	fmt.Fprintf(w, "  probed                   %8d  domains that produced a result\n", s.Attempted)
 	fmt.Fprintf(w, "  apex serves a site       %8d  %s of those\n", s.ApexServes, pct(s.ApexServes))
 	fmt.Fprintf(w, "                                     (the rest is CDN/API infrastructure with no opinion about www)\n")
-	if s.ApexServes > 0 {
-		p := float64(s.WWWSupportedOfServing) / float64(s.ApexServes)
-		ci := ConfidenceInterval(p, s.ApexServes, s.Population)
-		fmt.Fprintf(w, "\n  ...of those, www works   %8d  %s +/- %.2f pts (95%% CI)   <- THE ANSWER\n",
-			s.WWWSupportedOfServing, ofServing(s.WWWSupportedOfServing), ci)
+	if s.WWWUnknown > 0 {
+		fmt.Fprintf(w, "  ...www never measured    %8d  probe stalled — excluded from the ratio below\n", s.WWWUnknown)
 	}
-	fmt.Fprintf(w, "  ...of those, www broken  %8d  %s\n", s.WWWBroken, ofServing(s.WWWBroken))
+	if measured > 0 {
+		p := float64(s.WWWSupportedOfServing) / float64(measured)
+		ci := ConfidenceInterval(p, measured, s.Population)
+		fmt.Fprintf(w, "\n  of the %d measured:\n", measured)
+		fmt.Fprintf(w, "    www works              %8d  %s +/- %.2f pts (95%% CI)   <- THE ANSWER\n",
+			s.WWWSupportedOfServing, ofMeasured(s.WWWSupportedOfServing), ci)
+		fmt.Fprintf(w, "    www broken             %8d  %s\n", s.WWWBroken, ofMeasured(s.WWWBroken))
+	}
 	fmt.Fprintf(w, "\n  (www works across the whole corpus: %d, %s — but a popularity list ranked partly by\n", s.WWWSupported, pct(s.WWWSupported))
 	fmt.Fprintf(w, "   DNS query volume is full of CDN and API infrastructure that was never a website,\n")
 	fmt.Fprintf(w, "   so that denominator understates it.)\n")
