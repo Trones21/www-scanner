@@ -65,7 +65,11 @@
       "Bash(git fetch *)",
       "Bash(git ls-remote *)",
       "Bash(gofmt -w internal/resolve)",
-      "Bash(gofmt -w internal/scan)"
+      "Bash(gofmt -w internal/scan)",
+      "Bash(gofmt -w internal/record)",
+      "Bash(rm -f /tmp/d.bin*)",
+      "Bash(rm -f results/census-full.bin*)",
+      "Bash(nohup /tmp/wwwscan scan -corpus corpora/tranco.txt -out results/census-full.bin -workers 200 -timeout 10s -connect-timeout 5s -check-delegation -resolver 1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4,9.9.9.10,149.112.112.10)"
     ],
     "additionalDirectories": [
       "/dev"

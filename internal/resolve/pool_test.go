@@ -39,6 +39,12 @@ func newSynthServer(t *testing.T, delay time.Duration, drop int) *synthServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// Hundreds of queries can land within microseconds of each other. The
+	// default receive buffer overflows, the kernel drops the excess, and the
+	// client dutifully waits out its timeout — which looks exactly like the
+	// pool failing to multiplex. Give the harness room so it measures the
+	// client rather than itself.
+	_ = pc.SetReadBuffer(4 << 20)
 	s := &synthServer{pc: pc, addr: pc.LocalAddr().String(), delay: delay, drop: drop}
 	s.wg.Add(1)
 	go s.serve()
@@ -48,27 +54,28 @@ func newSynthServer(t *testing.T, delay time.Duration, drop int) *synthServer {
 
 func (s *synthServer) serve() {
 	defer s.wg.Done()
-	buf := make([]byte, 4096)
 	for {
+		// A fresh buffer per packet so the read loop can hand off without
+		// waiting for anything. Parsing in this loop would serialize every
+		// response behind one unpack.
+		buf := make([]byte, 1500)
 		n, from, err := s.pc.ReadFromUDP(buf)
 		if err != nil {
 			return
-		}
-		req := new(dns.Msg)
-		if err := req.Unpack(buf[:n]); err != nil {
-			continue
 		}
 		seq := s.queries.Add(1)
 		if s.drop > 0 && seq%int64(s.drop) == 0 {
 			continue // silently dropped, exactly like a rate limiter
 		}
-		payload := make([]byte, n)
-		copy(payload, buf[:n])
-		go s.answer(req, from, payload)
+		go s.answer(buf[:n], from)
 	}
 }
 
-func (s *synthServer) answer(req *dns.Msg, to *net.UDPAddr, _ []byte) {
+func (s *synthServer) answer(payload []byte, to *net.UDPAddr) {
+	req := new(dns.Msg)
+	if err := req.Unpack(payload); err != nil {
+		return
+	}
 	if s.delay > 0 {
 		time.Sleep(s.delay)
 	}

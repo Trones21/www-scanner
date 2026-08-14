@@ -102,6 +102,42 @@ const (
 	TLSError            TLS = 7
 )
 
+// Delegation is what the parent zone says about this name, independent of
+// whether anything is pointed at it.
+//
+// This is the difference between "nobody registered it", "somebody registered
+// it and pointed it nowhere", and "somebody registered it and the nameservers
+// are broken" — three different facts that all look like "does not resolve" if
+// you only ask for an address.
+type Delegation uint8
+
+const (
+	DelegationUnchecked Delegation = 0
+	// DelegationOK means the apex has NS records: the name is delegated and
+	// its nameservers answered.
+	DelegationOK Delegation = 1
+	// DelegationNone means NXDOMAIN for NS — the name is not in the parent
+	// zone. Not delegated, lapsed, or suspended by the registrar. WHOIS is
+	// the only thing that separates those, and it does not scale.
+	DelegationNone Delegation = 2
+	// DelegationNoData means NOERROR with no NS records, which at an apex is
+	// unusual: an empty non-terminal, or a parent answering for a name it
+	// does not delegate.
+	DelegationNoData Delegation = 3
+	// DelegationBroken means SERVFAIL, REFUSED or a timeout — delegated, but
+	// the delegation does not work.
+	DelegationBroken Delegation = 4
+)
+
+var delegationNames = [...]string{"unchecked", "delegated", "not-delegated", "no-ns-records", "broken"}
+
+func (d Delegation) String() string {
+	if int(d) < len(delegationNames) {
+		return delegationNames[d]
+	}
+	return "invalid"
+}
+
 // Terminal classifies where a redirect chain came to rest, relative to the
 // domain being probed. Storing the class rather than the host keeps the
 // record fixed-width.
@@ -145,12 +181,13 @@ type Side struct {
 
 // Record is one corpus entry's full result. Encoded width is Width bytes.
 type Record struct {
-	Status    Status
-	Flags     Flags
-	Canonical Canonical
-	DurationM uint16 // total probe wall time in ms, saturating
-	Apex      Side
-	WWW       Side
+	Status     Status
+	Flags      Flags
+	Canonical  Canonical
+	Delegation Delegation
+	DurationM  uint16 // total probe wall time in ms, saturating
+	Apex       Side
+	WWW        Side
 }
 
 // Encode writes r into b, which must be at least Width bytes.
@@ -159,7 +196,7 @@ func (r Record) Encode(b []byte) {
 	b[0] = uint8(r.Status)
 	b[1] = uint8(r.Flags)
 	b[2] = uint8(r.Canonical)
-	b[3] = 0 // reserved
+	b[3] = uint8(r.Delegation)
 	binary.LittleEndian.PutUint16(b[4:6], r.DurationM)
 	binary.LittleEndian.PutUint16(b[6:8], 0) // reserved
 	encodeSide(b[8:16], r.Apex)
@@ -170,12 +207,13 @@ func (r Record) Encode(b []byte) {
 func Decode(b []byte) Record {
 	_ = b[Width-1]
 	return Record{
-		Status:    Status(b[0]),
-		Flags:     Flags(b[1]),
-		Canonical: Canonical(b[2]),
-		DurationM: binary.LittleEndian.Uint16(b[4:6]),
-		Apex:      decodeSide(b[8:16]),
-		WWW:       decodeSide(b[16:24]),
+		Status:     Status(b[0]),
+		Flags:      Flags(b[1]),
+		Canonical:  Canonical(b[2]),
+		Delegation: Delegation(b[3]),
+		DurationM:  binary.LittleEndian.Uint16(b[4:6]),
+		Apex:       decodeSide(b[8:16]),
+		WWW:        decodeSide(b[16:24]),
 	}
 }
 
@@ -299,6 +337,40 @@ func (s Side) conclusive() bool {
 		return false
 	}
 	return s.TLS != TLSTimeout
+}
+
+// RegistrationState collapses delegation and apex resolution into the four
+// buckets a census of registered domains actually reports.
+func (r Record) RegistrationState() string {
+	switch r.Delegation {
+	case DelegationNone:
+		return "not delegated"
+	case DelegationBroken:
+		return "delegated, nameservers broken"
+	case DelegationNoData:
+		return "delegated, no NS records"
+	case DelegationUnchecked:
+		// Fall back to what the address lookup implies.
+		switch r.Apex.Resolve {
+		case ResolveNXDOMAIN:
+			return "not delegated"
+		case ResolveNoData:
+			return "delegated, pointed nowhere"
+		case ResolveOK:
+			return "points somewhere"
+		}
+		return "unknown"
+	}
+	switch r.Apex.Resolve {
+	case ResolveOK:
+		return "points somewhere"
+	case ResolveNoData:
+		return "delegated, pointed nowhere"
+	case ResolveNXDOMAIN:
+		// Delegated at the parent but the zone denies its own apex.
+		return "delegated, apex missing"
+	}
+	return "delegated, lookup failed"
 }
 
 var resolveNames = [...]string{"unattempted", "ok", "nxdomain", "nodata", "timeout", "servfail", "refused", "error"}

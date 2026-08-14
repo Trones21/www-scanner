@@ -55,18 +55,20 @@ type Summary struct {
 	// boolean counts as support.
 	WWWWildcardOnly int
 
-	ApexResolve map[record.Resolve]int
-	WWWResolve  map[record.Resolve]int
-	WWWTLS      map[record.TLS]int
-	WWWHTTP     map[int]int
-	Canonical   map[record.Canonical]int
-	RRTypes     map[record.RRTypes]int
+	Registration map[string]int
+	ApexResolve  map[record.Resolve]int
+	WWWResolve   map[record.Resolve]int
+	WWWTLS       map[record.TLS]int
+	WWWHTTP      map[int]int
+	Canonical    map[record.Canonical]int
+	RRTypes      map[record.RRTypes]int
 }
 
 // Build walks the results and aggregates them.
 func Build(c *corpus.Corpus, res sink.Sink) Summary {
 	s := Summary{
 		BrokenReason: map[string]int{},
+		Registration: map[string]int{},
 		ApexResolve:  map[record.Resolve]int{},
 		WWWResolve:   map[record.Resolve]int{},
 		WWWTLS:       map[record.TLS]int{},
@@ -85,6 +87,7 @@ func Build(c *corpus.Corpus, res sink.Sink) Summary {
 			continue
 		}
 		s.Attempted++
+		s.Registration[r.RegistrationState()]++
 		s.ApexResolve[r.Apex.Resolve]++
 		s.WWWResolve[r.WWW.Resolve]++
 		s.WWWTLS[r.WWW.TLS]++
@@ -214,6 +217,9 @@ func (s Summary) Write(w io.Writer) {
 		fmt.Fprintf(w, "\nHOW www BREAKS (on domains whose apex serves)\n")
 		writeEnum(w, s.BrokenReason, s.WWWBroken, func(k string) string { return k })
 	}
+
+	fmt.Fprintf(w, "\nREGISTRATION STATE — apex\n")
+	writeEnum(w, s.Registration, s.Attempted, func(k string) string { return k })
 
 	fmt.Fprintf(w, "\nDNS — www\n")
 	writeEnum(w, s.WWWResolve, s.Attempted, func(k record.Resolve) string { return k.String() })

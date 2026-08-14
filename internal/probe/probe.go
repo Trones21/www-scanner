@@ -37,6 +37,10 @@ type Config struct {
 	// an http-only site still yields a status and a redirect chain. The TLS
 	// failure is still what gets recorded in the TLS field.
 	HTTPFallback bool
+	// CheckDelegation asks the parent for NS records at the apex, which
+	// separates "nobody registered this" from "registered and pointed
+	// nowhere" — two facts an address lookup flattens into one.
+	CheckDelegation bool
 	// WildcardCheck probes a random label when www resolves, to tell
 	// "someone configured www" apart from "the zone answers to everything".
 	WildcardCheck bool
@@ -48,12 +52,13 @@ type Config struct {
 // DefaultConfig returns settings suited to a wide scan of mostly-cold hosts.
 func DefaultConfig() Config {
 	return Config{
-		Timeout:        10 * time.Second,
-		ConnectTimeout: 5 * time.Second,
-		MaxHops:        10,
-		HTTPFallback:   true,
-		WildcardCheck:  true,
-		UserAgent:      "www-scanner/0.1 (+https://thomasrones.com/does-www-still-work)",
+		Timeout:         10 * time.Second,
+		ConnectTimeout:  5 * time.Second,
+		MaxHops:         10,
+		HTTPFallback:    true,
+		WildcardCheck:   true,
+		CheckDelegation: false,
+		UserAgent:       "www-scanner/0.1 (+https://thomasrones.com/does-www-still-work)",
 	}
 }
 
@@ -142,7 +147,18 @@ func (p *Prober) Probe(ctx context.Context, domain string) record.Record {
 	wwwCh := make(chan sideResult, 1)
 	go func() { s, h, fb := p.probeName(ctx, domain, domain); apexCh <- sideResult{s, h, fb} }()
 	go func() { s, h, fb := p.probeName(ctx, www, domain); wwwCh <- sideResult{s, h, fb} }()
+
+	// The NS query is independent of both ladders, so it rides along rather
+	// than adding to the critical path.
+	delegCh := make(chan record.Delegation, 1)
+	if p.cfg.CheckDelegation {
+		go func() { delegCh <- p.res.Delegation(ctx, domain) }()
+	}
+
 	apexRes, wwwRes := <-apexCh, <-wwwCh
+	if p.cfg.CheckDelegation {
+		rec.Delegation = <-delegCh
+	}
 
 	rec.Apex, rec.WWW = apexRes.side, wwwRes.side
 	if apexRes.fellBack || wwwRes.fellBack {

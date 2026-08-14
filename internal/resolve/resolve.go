@@ -206,6 +206,49 @@ func mergeStatus(a, b record.Resolve) record.Resolve {
 	return b
 }
 
+// Delegation asks the parent what it knows about a name, independent of
+// whether an address exists.
+//
+// An address lookup conflates three different facts into "did not resolve":
+// nobody registered the name, somebody registered it and pointed it nowhere,
+// and somebody registered it and the nameservers are dead. Querying NS
+// separates them, which matters once the corpus is a registry zone file and
+// every entry is registered by construction.
+func (r *Resolver) Delegation(ctx context.Context, name string) record.Delegation {
+	fqdn := dns.Fqdn(name)
+	m := new(dns.Msg)
+	m.SetQuestion(fqdn, dns.TypeNS)
+	m.SetEdns0(r.cfg.UDPSize, false)
+	m.RecursionDesired = true
+
+	resp, err := r.exchange(ctx, m)
+	if err != nil {
+		return record.DelegationBroken
+	}
+	switch resp.Rcode {
+	case dns.RcodeNameError:
+		return record.DelegationNone
+	case dns.RcodeServerFailure, dns.RcodeRefused:
+		return record.DelegationBroken
+	case dns.RcodeSuccess:
+		for _, rr := range resp.Answer {
+			if _, ok := rr.(*dns.NS); ok {
+				return record.DelegationOK
+			}
+		}
+		// NOERROR with no NS in the answer. Recursive resolvers often put
+		// the delegation in AUTHORITY instead, so check there before
+		// concluding the name has none.
+		for _, rr := range resp.Ns {
+			if _, ok := rr.(*dns.NS); ok {
+				return record.DelegationOK
+			}
+		}
+		return record.DelegationNoData
+	}
+	return record.DelegationBroken
+}
+
 // Exists reports whether a name resolves at all, without caring what to. Used
 // for the wildcard probe, where the only question is whether a label nobody
 // configured still comes back with an address.
@@ -234,6 +277,46 @@ func WildcardLabel(domain string) string {
 	sb.WriteByte('.')
 	sb.WriteString(domain)
 	return sb.String()
+}
+
+// exchange sends one prepared message with the configured retries and returns
+// the raw response, so callers that care about rcodes rather than addresses do
+// not have to reimplement the retry and pool logic.
+func (r *Resolver) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
+	var lastServer string
+	var lastErr error
+	for range r.cfg.Attempts {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var resp *dns.Msg
+		var err error
+		var server string
+		if r.pool != nil {
+			c := r.pool.pick()
+			if lastServer != "" {
+				c = r.pool.pickOther(lastServer)
+			}
+			server = c.server
+			resp, err = c.exchange(ctx, m.Copy(), r.cfg.Timeout)
+		} else {
+			server = r.cfg.Servers[int(r.next.Add(1))%len(r.cfg.Servers)]
+			resp, _, err = r.udp.ExchangeContext(ctx, m, server)
+		}
+		lastServer = server
+		if err == nil && resp != nil && resp.Truncated {
+			resp, _, err = r.tcp.ExchangeContext(ctx, m, server)
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return resp, nil
+	}
+	if lastErr == nil {
+		lastErr = errTimeout
+	}
+	return nil, lastErr
 }
 
 func (r *Resolver) query(ctx context.Context, name string, qtype uint16) Answer {

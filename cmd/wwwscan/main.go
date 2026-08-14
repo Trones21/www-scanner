@@ -263,6 +263,7 @@ func cmdScan(ctx context.Context, args []string) error {
 	timeout := fs.Duration("timeout", 10*time.Second, "per-name HTTP timeout")
 	connTimeout := fs.Duration("connect-timeout", 5*time.Second, "TCP/TLS connect timeout")
 	noWildcard := fs.Bool("no-wildcard-check", false, "skip the random-label wildcard probe")
+	checkDeleg := fs.Bool("check-delegation", false, "also query NS at the apex, separating 'not registered' from 'registered but pointed nowhere'")
 	noFallback := fs.Bool("no-http-fallback", false, "do not retry plaintext when TLS fails")
 	histogram := fs.Bool("histogram", false, "print the completion-time distribution at the end")
 	if err := fs.Parse(args); err != nil {
@@ -324,6 +325,7 @@ func cmdScan(ctx context.Context, args []string) error {
 	pcfg.Timeout = *timeout
 	pcfg.ConnectTimeout = *connTimeout
 	pcfg.WildcardCheck = !*noWildcard
+	pcfg.CheckDelegation = *checkDeleg
 	pcfg.HTTPFallback = !*noFallback
 	p := probe.New(pcfg, res, *workers*2)
 
